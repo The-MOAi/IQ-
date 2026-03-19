@@ -191,10 +191,8 @@ export default function App() {
       {/* ===== TOP BAR ===== */}
       <div className="top-bar">
         <div>
-          <div className="top-bar h1" style={{ fontSize: 18, fontWeight: 'bold', letterSpacing: 2 }}>
-            MGII &nbsp; 第１表Ｓ 資金繰表Ａ
-          </div>
-          <div className="subtitle">現金出納帳 兼 仕訳帳</div>
+          <div className="top-bar-title">MGII 第１表Ｓ 資金繰表Ａ</div>
+          <div className="top-bar-subtitle">現金出納帳 兼 仕訳帳</div>
         </div>
         <div className="top-bar-actions">
           <button className="btn btn-success" onClick={() => window.print()}>
@@ -411,6 +409,7 @@ export default function App() {
           <div className="section-title">
             入金（収入）・出金（支出）　資金繰表
           </div>
+          <div className="table-scroll-hint">← 横スクロールで全列表示 →</div>
           <div className="table-wrap">
             <table className="cf-table">
               <thead>

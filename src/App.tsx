@@ -1,806 +1,367 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import {
-  GameState,
-  CashFlowRow,
-  INCOME_COLS,
-  EXPENSE_COLS,
-  IncomeKey,
-  ExpenseKey,
-  createInitialGameState,
-  sumIncome,
-  sumExpense,
-  calcCashBalances,
-} from './types'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { useVoiceRecognition } from './useVoiceRecognition'
+import type { TranscriptEntry } from './types'
 
-const STORAGE_KEY = 'mg-game-state'
+const LANGUAGES = [
+  { code: 'ja-JP', label: '日本語' },
+  { code: 'en-US', label: 'English' },
+  { code: 'zh-CN', label: '中文' },
+  { code: 'ko-KR', label: '한국어' },
+  { code: 'es-ES', label: 'Español' },
+  { code: 'fr-FR', label: 'Français' },
+  { code: 'de-DE', label: 'Deutsch' },
+]
 
-function loadState(): GameState {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) return JSON.parse(saved)
-  } catch { /* ignore */ }
-  return createInitialGameState()
-}
+function App() {
+  const {
+    state,
+    interimText,
+    finalText,
+    setFinalText,
+    error,
+    isSupported,
+    start,
+    stop,
+    clear,
+  } = useVoiceRecognition()
 
-function saveState(state: GameState) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-}
+  const [language, setLanguage] = useState('ja-JP')
+  const [autoClean, setAutoClean] = useState(true)
+  const [continuousMode, setContinuousMode] = useState(true)
+  const [history, setHistory] = useState<TranscriptEntry[]>(() => {
+    try {
+      const saved = localStorage.getItem('iq-voice-history')
+      return saved ? JSON.parse(saved) : []
+    } catch {
+      return []
+    }
+  })
+  const [showSettings, setShowSettings] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const textAreaRef = useRef<HTMLTextAreaElement>(null)
+  const displayRef = useRef<HTMLDivElement>(null)
 
-// ───────────────────────────────────────────────
-// Editable number cell
-// ───────────────────────────────────────────────
-function NumCell({
-  value,
-  onChange,
-  className,
-}: {
-  value: number
-  onChange: (v: number) => void
-  className?: string
-}) {
-  const [editing, setEditing] = useState(false)
-  const [raw, setRaw] = useState('')
-
-  const start = () => {
-    setRaw(value === 0 ? '' : String(value))
-    setEditing(true)
-  }
-
-  const commit = () => {
-    const n = parseFloat(raw)
-    onChange(isNaN(n) ? 0 : n)
-    setEditing(false)
-  }
-
-  return (
-    <input
-      className={`cell-input ${className ?? ''}`}
-      type="number"
-      value={editing ? raw : value === 0 ? '' : value}
-      onFocus={start}
-      onChange={e => setRaw(e.target.value)}
-      onBlur={commit}
-      onKeyDown={e => {
-        if (e.key === 'Enter') {
-          commit()
-          ;(e.target as HTMLInputElement).blur()
-        }
-      }}
-      placeholder=""
-      min={0}
-    />
-  )
-}
-
-// ───────────────────────────────────────────────
-// Main App
-// ───────────────────────────────────────────────
-export default function App() {
-  const [state, setState] = useState<GameState>(loadState)
-
+  // Auto-scroll display
   useEffect(() => {
-    saveState(state)
-  }, [state])
+    if (displayRef.current) {
+      displayRef.current.scrollTop = displayRef.current.scrollHeight
+    }
+  }, [finalText, interimText])
 
-  const cashBalances = useMemo(
-    () => calcCashBalances(state.rows, state.initialCash),
-    [state.rows, state.initialCash]
-  )
+  // Save history to localStorage
+  useEffect(() => {
+    localStorage.setItem('iq-voice-history', JSON.stringify(history.slice(0, 50)))
+  }, [history])
 
-  const lastBalance = cashBalances[cashBalances.length - 1] ?? state.initialCash
+  const handleToggleRecording = useCallback(() => {
+    if (state === 'recording') {
+      stop()
+      // Save to history if there's text
+      if (finalText.trim()) {
+        const entry: TranscriptEntry = {
+          id: crypto.randomUUID(),
+          text: finalText,
+          editedText: finalText,
+          timestamp: new Date(),
+          lang: language,
+        }
+        setHistory(prev => [entry, ...prev])
+      }
+    } else {
+      start(language, autoClean, continuousMode)
+    }
+  }, [state, stop, start, language, autoClean, continuousMode, finalText])
 
-  // ── row cell updater ──
-  const updateIncome = useCallback(
-    (rowId: number, key: IncomeKey, val: number) => {
-      setState(s => ({
-        ...s,
-        rows: s.rows.map(r =>
-          r.id === rowId ? { ...r, income: { ...r.income, [key]: val } } : r
-        ),
-      }))
-    },
-    []
-  )
+  const handleCopy = useCallback(async () => {
+    const text = finalText.trim()
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Fallback
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }, [finalText])
 
-  const updateExpense = useCallback(
-    (rowId: number, key: ExpenseKey, val: number) => {
-      setState(s => ({
-        ...s,
-        rows: s.rows.map(r =>
-          r.id === rowId ? { ...r, expense: { ...r.expense, [key]: val } } : r
-        ),
-      }))
-    },
-    []
-  )
+  const handleCopyAndClear = useCallback(async () => {
+    await handleCopy()
+    setTimeout(() => {
+      clear()
+    }, 300)
+  }, [handleCopy, clear])
 
-  const updateMemo = useCallback((rowId: number, memo: string) => {
-    setState(s => ({
-      ...s,
-      rows: s.rows.map(r => (r.id === rowId ? { ...r, memo } : r)),
-    }))
+  const handleEditToggle = useCallback(() => {
+    if (editMode && textAreaRef.current) {
+      setFinalText(textAreaRef.current.value)
+    }
+    setEditMode(!editMode)
+  }, [editMode, setFinalText])
+
+  const handleLoadFromHistory = useCallback((entry: TranscriptEntry) => {
+    setFinalText(entry.editedText || entry.text)
+    setShowHistory(false)
+  }, [setFinalText])
+
+  const handleClearHistory = useCallback(() => {
+    setHistory([])
+    localStorage.removeItem('iq-voice-history')
   }, [])
 
-  // ── totals ──
-  const incomeTotals = useMemo(() => {
-    const totals: Record<IncomeKey, number> = {} as Record<IncomeKey, number>
-    for (const col of INCOME_COLS) totals[col.key] = 0
-    for (const row of state.rows) {
-      for (const col of INCOME_COLS) {
-        totals[col.key] += row.income[col.key]
+  // Keyboard shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'V') {
+        e.preventDefault()
+        handleToggleRecording()
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
+        e.preventDefault()
+        handleCopy()
       }
     }
-    return totals
-  }, [state.rows])
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [handleToggleRecording, handleCopy])
 
-  const expenseTotals = useMemo(() => {
-    const totals: Record<ExpenseKey, number> = {} as Record<ExpenseKey, number>
-    for (const col of EXPENSE_COLS) totals[col.key] = 0
-    for (const row of state.rows) {
-      for (const col of EXPENSE_COLS) {
-        totals[col.key] += row.expense[col.key]
-      }
-    }
-    return totals
-  }, [state.rows])
-
-  const grandIncomeTotal = useMemo(
-    () => Object.values(incomeTotals).reduce((a, b) => a + b, 0),
-    [incomeTotals]
-  )
-  const grandExpenseTotal = useMemo(
-    () => Object.values(expenseTotals).reduce((a, b) => a + b, 0),
-    [expenseTotals]
-  )
-
-  // ── inventory ──
-  const invTotal = useMemo(() => {
-    const { materials, wip, products } = state.inventory
+  if (!isSupported) {
     return (
-      materials.count * materials.unitPrice +
-      wip.count * wip.unitPrice +
-      products.count * products.unitPrice
+      <div className="app">
+        <div className="unsupported">
+          <div className="unsupported-icon">🎤</div>
+          <h2>音声認識非対応</h2>
+          <p>お使いのブラウザはWeb Speech APIに対応していません。</p>
+          <p>Chrome, Edge, またはSafariをお使いください。</p>
+        </div>
+      </div>
     )
-  }, [state.inventory])
-
-  // ── period expenses ──
-  const calcPeTotal = (pe: { regularEmployees: number; partTimeEmployees: number }) =>
-    pe.regularEmployees * 22 + pe.partTimeEmployees * 11
-
-  // ── cash account ──
-  const caTotal = useMemo(() => {
-    const adj = state.cashAccountAdjustments
-    return adj.materialDeficiency + adj.defectiveProducts + adj.merchandise + adj.damages
-  }, [state.cashAccountAdjustments])
-
-  const reset = () => {
-    if (confirm('ゲームをリセットしますか？全データが消えます。')) {
-      const fresh = createInitialGameState()
-      setState(fresh)
-    }
   }
-
-  const fmt = (n: number) =>
-    n === 0 ? '' : n.toLocaleString('ja-JP')
-
-  const fmtBalance = (n: number) =>
-    n === 0 ? '0' : n.toLocaleString('ja-JP')
 
   return (
     <div className="app">
-      {/* ===== TOP BAR ===== */}
-      <div className="top-bar">
-        <div>
-          <div className="top-bar-title">MGII 第１表Ｓ 資金繰表Ａ</div>
-          <div className="top-bar-subtitle">現金出納帳 兼 仕訳帳</div>
+      {/* Header */}
+      <header className="header">
+        <div className="header-left">
+          <h1 className="logo">
+            <span className="logo-icon">◉</span>
+            IQ Voice
+          </h1>
         </div>
-        <div className="top-bar-actions">
-          <button className="btn btn-success" onClick={() => window.print()}>
-            印刷
+        <div className="header-right">
+          <button
+            className={`icon-btn ${showHistory ? 'active' : ''}`}
+            onClick={() => { setShowHistory(!showHistory); setShowSettings(false) }}
+            title="履歴"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
           </button>
-          <button className="btn btn-danger" onClick={reset}>
-            リセット
+          <button
+            className={`icon-btn ${showSettings ? 'active' : ''}`}
+            onClick={() => { setShowSettings(!showSettings); setShowHistory(false) }}
+            title="設定"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
           </button>
+        </div>
+      </header>
+
+      {/* Settings Panel */}
+      {showSettings && (
+        <div className="panel settings-panel">
+          <h3>設定</h3>
+          <div className="setting-row">
+            <label>言語</label>
+            <select value={language} onChange={e => setLanguage(e.target.value)}>
+              {LANGUAGES.map(l => (
+                <option key={l.code} value={l.code}>{l.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="setting-row">
+            <label>フィラー除去</label>
+            <button
+              className={`toggle ${autoClean ? 'on' : ''}`}
+              onClick={() => setAutoClean(!autoClean)}
+            >
+              <span className="toggle-knob" />
+            </button>
+          </div>
+          <div className="setting-row">
+            <label>連続モード</label>
+            <button
+              className={`toggle ${continuousMode ? 'on' : ''}`}
+              onClick={() => setContinuousMode(!continuousMode)}
+            >
+              <span className="toggle-knob" />
+            </button>
+          </div>
+          <p className="setting-hint">
+            ショートカット: Ctrl+Shift+V（録音）/ Ctrl+Shift+C（コピー）
+          </p>
+        </div>
+      )}
+
+      {/* History Panel */}
+      {showHistory && (
+        <div className="panel history-panel">
+          <div className="panel-header">
+            <h3>履歴</h3>
+            {history.length > 0 && (
+              <button className="text-btn danger" onClick={handleClearHistory}>すべて削除</button>
+            )}
+          </div>
+          {history.length === 0 ? (
+            <p className="empty-state">まだ履歴がありません</p>
+          ) : (
+            <div className="history-list">
+              {history.map(entry => (
+                <button
+                  key={entry.id}
+                  className="history-item"
+                  onClick={() => handleLoadFromHistory(entry)}
+                >
+                  <div className="history-text">
+                    {(entry.editedText || entry.text).slice(0, 80)}
+                    {(entry.editedText || entry.text).length > 80 ? '...' : ''}
+                  </div>
+                  <div className="history-meta">
+                    {new Date(entry.timestamp).toLocaleString('ja-JP')}
+                    <span className="history-lang">{entry.lang}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Main Content */}
+      <main className="main">
+        {/* Transcription Display */}
+        <div className="transcript-area" ref={displayRef}>
+          {!finalText && !interimText && state === 'idle' && (
+            <div className="placeholder">
+              <p>マイクボタンを押して話し始めてください</p>
+              <p className="placeholder-sub">音声がリアルタイムでテキストに変換されます</p>
+            </div>
+          )}
+          {editMode ? (
+            <textarea
+              ref={textAreaRef}
+              className="edit-textarea"
+              defaultValue={finalText}
+              autoFocus
+            />
+          ) : (
+            <>
+              {finalText && <span className="final-text">{finalText}</span>}
+              {interimText && <span className="interim-text">{interimText}</span>}
+            </>
+          )}
+        </div>
+
+        {/* Action Bar */}
+        {finalText && (
+          <div className="action-bar">
+            <button className="action-btn" onClick={handleEditToggle} title={editMode ? '保存' : '編集'}>
+              {editMode ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                </svg>
+              )}
+              <span>{editMode ? '保存' : '編集'}</span>
+            </button>
+            <button className="action-btn" onClick={handleCopy} title="コピー">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              <span>{copied ? 'コピー済み!' : 'コピー'}</span>
+            </button>
+            <button className="action-btn primary" onClick={handleCopyAndClear} title="コピーしてクリア">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 2L11 13" />
+                <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+              </svg>
+              <span>送信</span>
+            </button>
+            <button className="action-btn danger-btn" onClick={clear} title="クリア">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+              <span>クリア</span>
+            </button>
+          </div>
+        )}
+      </main>
+
+      {/* Recording Button */}
+      <div className="record-container">
+        {state === 'recording' && (
+          <div className="pulse-ring" />
+        )}
+        <button
+          className={`record-btn ${state === 'recording' ? 'recording' : ''}`}
+          onClick={handleToggleRecording}
+          title={state === 'recording' ? '停止' : '録音開始'}
+        >
+          {state === 'recording' ? (
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          ) : (
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          )}
+        </button>
+        <div className="record-label">
+          {state === 'recording' ? '録音中...' : 'タップして録音'}
         </div>
       </div>
 
-      <div className="main-panel">
-
-        {/* ===== COMPANY INFO ===== */}
-        <div className="info-row">
-          <div className="info-group">
-            <label>① 日付</label>
-            <input
-              type="date"
-              value={state.company.date}
-              onChange={e =>
-                setState(s => ({ ...s, company: { ...s.company, date: e.target.value } }))
-              }
-            />
-          </div>
-          <div className="info-group">
-            <label>期</label>
-            <input
-              type="number"
-              value={state.company.period}
-              min={1}
-              onChange={e =>
-                setState(s => ({
-                  ...s,
-                  company: { ...s.company, period: Number(e.target.value) },
-                }))
-              }
-            />
-          </div>
-          <div className="info-group">
-            <label>社名</label>
-            <input
-              type="text"
-              value={state.company.companyName}
-              style={{ width: 120 }}
-              onChange={e =>
-                setState(s => ({
-                  ...s,
-                  company: { ...s.company, companyName: e.target.value },
-                }))
-              }
-            />
-          </div>
-          <div className="info-group">
-            <label>社長名</label>
-            <input
-              type="text"
-              value={state.company.presidentName}
-              style={{ width: 120 }}
-              onChange={e =>
-                setState(s => ({
-                  ...s,
-                  company: { ...s.company, presidentName: e.target.value },
-                }))
-              }
-            />
-          </div>
-          <div className="info-group">
-            <label>期首現金</label>
-            <input
-              type="number"
-              value={state.initialCash}
-              onChange={e =>
-                setState(s => ({ ...s, initialCash: Number(e.target.value) }))
-              }
-              style={{ width: 80, textAlign: 'right' }}
-            />
-          </div>
+      {/* Error */}
+      {error && (
+        <div className="error-toast">
+          {error}
         </div>
+      )}
 
-        {/* ===== LOAN CONDITIONS ===== */}
-        <div className="section-card">
-          <div className="section-title">
-            <span className="section-num">②</span>
-            借金の条件
-          </div>
-          <div className="section-body">
-            <div className="loan-grid">
-              <div className="loan-field">
-                <label>借入1回（万円）</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.borrowingPerTime}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, borrowingPerTime: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field">
-                <label>借入人数</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.borrowingPeople}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, borrowingPeople: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field">
-                <label>金利人数</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.interestPeople}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, interestPeople: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field">
-                <label>金利期数</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.interestPeriods}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, interestPeriods: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field">
-                <label>担保高（→への場合）</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.collateralHigh}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, collateralHigh: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field">
-                <label>担保低（→への場合）</label>
-                <input
-                  type="number"
-                  value={state.loanConditions.collateralLow}
-                  onChange={e =>
-                    setState(s => ({
-                      ...s,
-                      loanConditions: { ...s.loanConditions, collateralLow: Number(e.target.value) },
-                    }))
-                  }
-                />
-              </div>
-              <div className="loan-field" style={{ alignSelf: 'center' }}>
-                <label style={{ color: '#c62828' }}>短期金利（自動計算）</label>
-                <strong style={{ fontSize: 14, color: '#c62828' }}>
-                  {state.loanConditions.borrowingPerTime} ×{' '}
-                  {state.loanConditions.interestPeople} ÷ {state.loanConditions.interestPeriods} ={' '}
-                  {(
-                    (state.loanConditions.borrowingPerTime *
-                      state.loanConditions.interestPeople) /
-                    state.loanConditions.interestPeriods
-                  ).toFixed(1)}{' '}
-                  万円/期
-                </strong>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ===== SUMMARY ===== */}
-        <div className="summary-box">
-          <div className="summary-item">
-            <span className="summary-label">期末現金残高</span>
-            <span className={`summary-value ${lastBalance < 0 ? 'negative' : ''}`}>
-              {fmtBalance(lastBalance)} 万円
-            </span>
-          </div>
-          <div className="summary-item">
-            <span className="summary-label">累計入金</span>
-            <span className="summary-value" style={{ color: '#1565c0' }}>
-              {fmtBalance(state.initialCash + grandIncomeTotal)} 万円
-            </span>
-          </div>
-          <div className="summary-item">
-            <span className="summary-label">累計出金</span>
-            <span className="summary-value" style={{ color: '#c62828' }}>
-              {fmtBalance(grandExpenseTotal)} 万円
-            </span>
-          </div>
-          <div className="summary-item">
-            <span className="summary-label">棚卸資産合計</span>
-            <span className="summary-value" style={{ color: '#2e7d32' }}>
-              {fmtBalance(invTotal)} 万円
-            </span>
-          </div>
-        </div>
-
-        {/* ===== CASH FLOW TABLE ===== */}
-        <div className="section-card">
-          <div className="section-title">
-            入金（収入）・出金（支出）　資金繰表
-          </div>
-          <div className="table-scroll-hint">← 横スクロールで全列表示 →</div>
-          <div className="table-wrap">
-            <table className="cf-table">
-              <thead>
-                {/* Group row */}
-                <tr>
-                  <th rowSpan={2} style={{ background: '#424242', color: 'white', minWidth: 28, textAlign: 'center', padding: '2px 4px', fontSize: 10 }}>
-                    行
-                  </th>
-                  <th className="th-group income" colSpan={INCOME_COLS.length}>
-                    入 金（収 入）
-                  </th>
-                  <th className="th-group expense" colSpan={EXPENSE_COLS.length}>
-                    出 金（支 出）
-                  </th>
-                  <th className="th-group balance" rowSpan={2} style={{ minWidth: 70, padding: '4px 8px', fontSize: 11 }}>
-                    現金<br />残高
-                  </th>
-                  <th rowSpan={2} style={{ background: '#37474f', color: 'white', minWidth: 80, padding: '4px 8px', fontSize: 10, textAlign: 'center' }}>
-                    メモ
-                  </th>
-                </tr>
-                {/* Column kana/label row */}
-                <tr>
-                  {INCOME_COLS.map(col => (
-                    <th key={col.key} className="th-col income">
-                      <span className="kana">{col.kana}</span>
-                      <span className="col-label">{col.label}</span>
-                    </th>
-                  ))}
-                  {EXPENSE_COLS.map(col => (
-                    <th key={col.key} className="th-col expense">
-                      <span className="kana">{col.kana}</span>
-                      <span className="col-label">{col.label}</span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {state.rows.map((row, idx) => {
-                  const balance = cashBalances[idx]
-                  const rowIncome = sumIncome(row.income)
-                  const rowExpense = sumExpense(row.expense)
-                  const hasActivity = rowIncome > 0 || rowExpense > 0
-                  return (
-                    <tr key={row.id} style={{ height: 'var(--cell-height)' }}>
-                      <td className="td-rownum">{row.id}</td>
-                      {INCOME_COLS.map(col => (
-                        <td
-                          key={col.key}
-                          className={`td-income ${row.income[col.key] > 0 ? 'has-value' : ''}`}
-                        >
-                          <NumCell
-                            value={row.income[col.key]}
-                            onChange={v => updateIncome(row.id, col.key, v)}
-                          />
-                        </td>
-                      ))}
-                      {EXPENSE_COLS.map(col => (
-                        <td
-                          key={col.key}
-                          className={`td-expense ${row.expense[col.key] > 0 ? 'has-value' : ''}`}
-                        >
-                          <NumCell
-                            value={row.expense[col.key]}
-                            onChange={v => updateExpense(row.id, col.key, v)}
-                          />
-                        </td>
-                      ))}
-                      <td
-                        className={`td-balance ${balance < 0 ? 'negative' : 'positive'}`}
-                        style={{ fontSize: hasActivity ? 12 : 10 }}
-                      >
-                        {fmtBalance(balance)}
-                      </td>
-                      <td className="td-memo">
-                        <input
-                          className="cell-memo"
-                          type="text"
-                          value={row.memo}
-                          onChange={e => updateMemo(row.id, e.target.value)}
-                          placeholder=""
-                        />
-                      </td>
-                    </tr>
-                  )
-                })}
-
-                {/* ── Total row ── */}
-                <tr className="tr-total">
-                  <td className="td-total-label">合計</td>
-                  {INCOME_COLS.map(col => (
-                    <td key={col.key} className="td-total-value income">
-                      {fmt(incomeTotals[col.key])}
-                    </td>
-                  ))}
-                  {EXPENSE_COLS.map(col => (
-                    <td key={col.key} className="td-total-value expense">
-                      {fmt(expenseTotals[col.key])}
-                    </td>
-                  ))}
-                  <td
-                    className={`td-balance ${lastBalance < 0 ? 'negative' : 'positive'}`}
-                    style={{ fontWeight: 'bold' }}
-                  >
-                    {fmtBalance(lastBalance)}
-                  </td>
-                  <td />
-                </tr>
-
-                {/* ── Grand total row ── */}
-                <tr className="tr-total" style={{ background: '#e8eaf6' }}>
-                  <td className="td-total-label" style={{ background: '#3949ab', color: 'white', fontSize: 10 }}>
-                    総計
-                  </td>
-                  <td
-                    className="td-total-value income"
-                    colSpan={INCOME_COLS.length}
-                    style={{ textAlign: 'center', fontSize: 12, fontWeight: 'bold' }}
-                  >
-                    入金合計: {fmtBalance(grandIncomeTotal)} 万円
-                  </td>
-                  <td
-                    className="td-total-value expense"
-                    colSpan={EXPENSE_COLS.length}
-                    style={{ textAlign: 'center', fontSize: 12, fontWeight: 'bold' }}
-                  >
-                    出金合計: {fmtBalance(grandExpenseTotal)} 万円
-                  </td>
-                  <td className={`td-balance ${lastBalance < 0 ? 'negative' : 'positive'}`}>
-                    {fmtBalance(lastBalance)}
-                  </td>
-                  <td />
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ===== BOTTOM SECTIONS ===== */}
-        <div className="bottom-grid">
-
-          {/* ── ⑥⑮ Inventory ── */}
-          <div className="section-card">
-            <div className="section-title">
-              <span className="section-num">⑥</span>
-              棚 卸 し（在庫管理）
-              <span className="section-num" style={{ marginLeft: 'auto' }}>⑮</span>
-            </div>
-            <div className="section-body" style={{ padding: 8 }}>
-              <table className="inv-table">
-                <thead>
-                  <tr>
-                    <th>品目</th>
-                    <th>個数</th>
-                    <th>単価（万円）</th>
-                    <th>金額（万円）</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(
-                    [
-                      { key: 'materials' as const, label: '材 料' },
-                      { key: 'wip' as const,       label: '仕掛品' },
-                      { key: 'products' as const,  label: '製 品' },
-                    ] as const
-                  ).map(item => {
-                    const inv = state.inventory[item.key]
-                    return (
-                      <tr key={item.key}>
-                        <td style={{ fontWeight: 'bold', textAlign: 'center' }}>{item.label}</td>
-                        <td>
-                          <input
-                            type="number"
-                            value={inv.count}
-                            min={0}
-                            onChange={e =>
-                              setState(s => ({
-                                ...s,
-                                inventory: {
-                                  ...s.inventory,
-                                  [item.key]: { ...inv, count: Number(e.target.value) },
-                                },
-                              }))
-                            }
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            value={inv.unitPrice}
-                            min={0}
-                            onChange={e =>
-                              setState(s => ({
-                                ...s,
-                                inventory: {
-                                  ...s.inventory,
-                                  [item.key]: { ...inv, unitPrice: Number(e.target.value) },
-                                },
-                              }))
-                            }
-                          />
-                        </td>
-                        <td className="inv-value">{fmtBalance(inv.count * inv.unitPrice)}</td>
-                      </tr>
-                    )
-                  })}
-                  <tr style={{ background: '#e8f5e9' }}>
-                    <td colSpan={3} style={{ fontWeight: 'bold', textAlign: 'right', paddingRight: 8 }}>
-                      棚卸資産合計
-                    </td>
-                    <td className="inv-value" style={{ fontSize: 13, fontWeight: 'bold' }}>
-                      {fmtBalance(invTotal)} 万円
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* ── ⑦ Period Expenses ── */}
-          <div className="section-card">
-            <div className="section-title">
-              <span className="section-num">⑦</span>
-              期次経費（福利・人件費）
-            </div>
-            <div className="section-body" style={{ padding: 8 }}>
-              <table className="pe-table">
-                <thead>
-                  <tr>
-                    <th>期</th>
-                    <th>正規（人）</th>
-                    <th>パート（人）</th>
-                    <th>合計（万円）</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {state.periodExpenses.map((pe, idx) => (
-                    <tr key={pe.period}>
-                      <td style={{ fontWeight: 'bold' }}>第{pe.period}期</td>
-                      <td>
-                        <input
-                          type="number"
-                          value={pe.regularEmployees}
-                          min={0}
-                          onChange={e =>
-                            setState(s => ({
-                              ...s,
-                              periodExpenses: s.periodExpenses.map((p, i) =>
-                                i === idx ? { ...p, regularEmployees: Number(e.target.value) } : p
-                              ),
-                            }))
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          value={pe.partTimeEmployees}
-                          min={0}
-                          onChange={e =>
-                            setState(s => ({
-                              ...s,
-                              periodExpenses: s.periodExpenses.map((p, i) =>
-                                i === idx ? { ...p, partTimeEmployees: Number(e.target.value) } : p
-                              ),
-                            }))
-                          }
-                        />
-                      </td>
-                      <td className="pe-total">{calcPeTotal(pe)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p style={{ fontSize: 10, color: '#777', marginTop: 6 }}>
-                ※ 正規1人=22万円 / パート0.5人=11万円
-              </p>
-            </div>
-          </div>
-
-          {/* ── ⑯ Cash Account ── */}
-          <div className="section-card">
-            <div className="section-title">
-              <span className="section-num">⑯</span>
-              現金勘定（調整額）
-            </div>
-            <div className="section-body" style={{ padding: 8 }}>
-              <table className="ca-table">
-                <tbody>
-                  {(
-                    [
-                      { key: 'materialDeficiency' as const, label: '材料欠（不足）' },
-                      { key: 'defectiveProducts' as const,  label: '仕損品（製造ミス）' },
-                      { key: 'merchandise' as const,        label: '商品（在庫損失）' },
-                      { key: 'damages' as const,            label: '損害賠償' },
-                    ] as const
-                  ).map(item => (
-                    <tr key={item.key}>
-                      <td>{item.label}</td>
-                      <td>
-                        <input
-                          type="number"
-                          value={state.cashAccountAdjustments[item.key]}
-                          onChange={e =>
-                            setState(s => ({
-                              ...s,
-                              cashAccountAdjustments: {
-                                ...s.cashAccountAdjustments,
-                                [item.key]: Number(e.target.value),
-                              },
-                            }))
-                          }
-                        />
-                      </td>
-                      <td style={{ fontSize: 10, color: '#777' }}>万円</td>
-                    </tr>
-                  ))}
-                  <tr style={{ background: '#e3f2fd' }}>
-                    <td style={{ fontWeight: 'bold' }}>合計調整額</td>
-                    <td className="ca-total">{fmtBalance(caTotal)}</td>
-                    <td style={{ fontSize: 10 }}>万円</td>
-                  </tr>
-                  <tr style={{ background: '#e8f5e9' }}>
-                    <td style={{ fontWeight: 'bold' }}>調整後現金残高</td>
-                    <td className="ca-total" style={{ color: lastBalance - caTotal < 0 ? '#c62828' : '#1565c0' }}>
-                      {fmtBalance(lastBalance - caTotal)}
-                    </td>
-                    <td style={{ fontSize: 10 }}>万円</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* ── ⑭⑰ Accident & Mistake ── */}
-          <div className="section-card">
-            <div className="section-title">
-              <span className="section-num">⑭</span>
-              事故・災害メモ
-              <span className="section-num" style={{ marginLeft: 'auto' }}>⑰</span>
-              ミス発覚
-            </div>
-            <div className="section-body" style={{ padding: 8 }}>
-              <div style={{ marginBottom: 8 }}>
-                <label style={{ fontSize: 11, color: '#555', display: 'block', marginBottom: 4 }}>
-                  事故・災害の内容
-                </label>
-                <textarea
-                  className="accident-textarea"
-                  value={state.accidentMemo}
-                  onChange={e => setState(s => ({ ...s, accidentMemo: e.target.value }))}
-                  placeholder="事故・災害の内容を記入してください..."
-                />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <label style={{ fontSize: 11, color: '#555' }}>ミス発覚件数:</label>
-                <input
-                  className="mistake-input"
-                  type="number"
-                  value={state.mistakeCount}
-                  min={0}
-                  onChange={e => setState(s => ({ ...s, mistakeCount: Number(e.target.value) }))}
-                />
-                <span style={{ fontSize: 11, color: '#555' }}>件</span>
-              </div>
-              <div className="mistake-result">
-                {state.mistakeCount === 0
-                  ? '✓ ミスなし → 決算へ！'
-                  : `⚠ ${state.mistakeCount}件のミスがあります。確認してください。`}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ===== RULES REMINDER ===== */}
-        <div style={{
-          marginTop: 10,
-          padding: '8px 12px',
-          background: '#fff8e1',
-          border: '1px solid #ffe082',
-          borderRadius: 4,
-          fontSize: 11,
-          color: '#5d4037',
-        }}>
-          <strong>ルール reminder:</strong>
-          第1ルール(期首にすること①〜⑦): 期首の処理を行う。
-          第2ルール(期末にすること⑧〜⑰): 期末の処理を行う。
-          第1ルールか第2ルールか、いずれか多い方をとることができる。両方はダメ。
-        </div>
-
+      {/* Status Bar */}
+      <div className="status-bar">
+        <span className="status-lang">{LANGUAGES.find(l => l.code === language)?.label}</span>
+        {autoClean && <span className="status-tag">フィラー除去ON</span>}
+        {finalText && (
+          <span className="status-count">{finalText.length}文字</span>
+        )}
       </div>
     </div>
   )
 }
+
+export default App

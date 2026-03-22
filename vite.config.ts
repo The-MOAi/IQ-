@@ -8,13 +8,13 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       manifest: {
-        name: 'MGII 資金繰表A',
-        short_name: 'MGII',
-        description: 'MG（マネジメントゲーム）II 第1表S 資金繰表A',
+        name: 'IQ Voice - AI音声入力',
+        short_name: 'IQ Voice',
+        description: 'AquaVoice/Typelessライクな高精度AI音声入力アプリ',
         start_url: '/',
         display: 'standalone',
-        background_color: '#5c4033',
-        theme_color: '#5c4033',
+        background_color: '#0a0a0f',
+        theme_color: '#0a0a0f',
         orientation: 'any',
         icons: [
           {

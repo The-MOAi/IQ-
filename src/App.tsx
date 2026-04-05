@@ -3,14 +3,47 @@ import { useVoiceRecognition } from './useVoiceRecognition'
 import type { TranscriptEntry } from './types'
 
 const LANGUAGES = [
-  { code: 'ja-JP', label: '日本語' },
-  { code: 'en-US', label: 'English' },
-  { code: 'zh-CN', label: '中文' },
-  { code: 'ko-KR', label: '한국어' },
-  { code: 'es-ES', label: 'Español' },
-  { code: 'fr-FR', label: 'Français' },
-  { code: 'de-DE', label: 'Deutsch' },
+  { code: 'ja-JP', label: '日本語', flag: '🇯🇵' },
+  { code: 'en-US', label: 'English', flag: '🇺🇸' },
+  { code: 'zh-CN', label: '中文', flag: '🇨🇳' },
+  { code: 'ko-KR', label: '한국어', flag: '🇰🇷' },
+  { code: 'es-ES', label: 'Español', flag: '🇪🇸' },
+  { code: 'fr-FR', label: 'Français', flag: '🇫🇷' },
+  { code: 'de-DE', label: 'Deutsch', flag: '🇩🇪' },
 ]
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function WaveformVisualizer({ volume, active }: { volume: number, active: boolean }) {
+  const bars = 24
+  return (
+    <div className="waveform">
+      {Array.from({ length: bars }, (_, i) => {
+        const center = bars / 2
+        const distFromCenter = Math.abs(i - center) / center
+        const baseHeight = active ? 0.15 : 0.08
+        const h = active
+          ? baseHeight + volume * (1 - distFromCenter * 0.7) * (0.6 + Math.sin(Date.now() / 200 + i * 0.5) * 0.4)
+          : baseHeight
+        return (
+          <div
+            key={i}
+            className="waveform-bar"
+            style={{
+              height: `${Math.max(4, h * 48)}px`,
+              opacity: active ? 0.6 + volume * 0.4 : 0.2,
+              transition: active ? 'height 0.08s ease' : 'height 0.5s ease',
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+}
 
 function App() {
   const {
@@ -20,13 +53,15 @@ function App() {
     setFinalText,
     error,
     isSupported,
+    duration,
+    volumeLevel,
     start,
     stop,
     clear,
   } = useVoiceRecognition()
 
-  const [language, setLanguage] = useState('ja-JP')
-  const [autoClean, setAutoClean] = useState(true)
+  const [language, setLanguage] = useState(() => localStorage.getItem('iq-voice-lang') || 'ja-JP')
+  const [autoClean, setAutoClean] = useState(() => localStorage.getItem('iq-voice-clean') !== 'false')
   const [continuousMode, setContinuousMode] = useState(true)
   const [history, setHistory] = useState<TranscriptEntry[]>(() => {
     try {
@@ -36,12 +71,24 @@ function App() {
       return []
     }
   })
-  const [showSettings, setShowSettings] = useState(false)
-  const [showHistory, setShowHistory] = useState(false)
+  const [view, setView] = useState<'main' | 'settings' | 'history'>('main')
   const [copied, setCopied] = useState(false)
   const [editMode, setEditMode] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem('iq-voice-onboarded'))
   const textAreaRef = useRef<HTMLTextAreaElement>(null)
   const displayRef = useRef<HTMLDivElement>(null)
+  const [, setTick] = useState(0)
+
+  // Animate waveform when recording
+  useEffect(() => {
+    if (state !== 'recording') return
+    const id = setInterval(() => setTick(t => t + 1), 80)
+    return () => clearInterval(id)
+  }, [state])
+
+  // Persist settings
+  useEffect(() => { localStorage.setItem('iq-voice-lang', language) }, [language])
+  useEffect(() => { localStorage.setItem('iq-voice-clean', String(autoClean)) }, [autoClean])
 
   // Auto-scroll display
   useEffect(() => {
@@ -58,7 +105,6 @@ function App() {
   const handleToggleRecording = useCallback(() => {
     if (state === 'recording') {
       stop()
-      // Save to history if there's text
       if (finalText.trim()) {
         const entry: TranscriptEntry = {
           id: crypto.randomUUID(),
@@ -79,26 +125,23 @@ function App() {
     if (!text) return
     try {
       await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
     } catch {
-      // Fallback
       const ta = document.createElement('textarea')
       ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
       document.body.appendChild(ta)
       ta.select()
       document.execCommand('copy')
       document.body.removeChild(ta)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
     }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }, [finalText])
 
   const handleCopyAndClear = useCallback(async () => {
     await handleCopy()
-    setTimeout(() => {
-      clear()
-    }, 300)
+    setTimeout(clear, 400)
   }, [handleCopy, clear])
 
   const handleEditToggle = useCallback(() => {
@@ -110,12 +153,17 @@ function App() {
 
   const handleLoadFromHistory = useCallback((entry: TranscriptEntry) => {
     setFinalText(entry.editedText || entry.text)
-    setShowHistory(false)
+    setView('main')
   }, [setFinalText])
 
   const handleClearHistory = useCallback(() => {
     setHistory([])
     localStorage.removeItem('iq-voice-history')
+  }, [])
+
+  const handleDismissOnboarding = useCallback(() => {
+    setShowOnboarding(false)
+    localStorage.setItem('iq-voice-onboarded', 'true')
   }, [])
 
   // Keyboard shortcut
@@ -134,14 +182,77 @@ function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [handleToggleRecording, handleCopy])
 
+  const currentLang = LANGUAGES.find(l => l.code === language)
+
   if (!isSupported) {
     return (
       <div className="app">
-        <div className="unsupported">
-          <div className="unsupported-icon">🎤</div>
-          <h2>音声認識非対応</h2>
-          <p>お使いのブラウザはWeb Speech APIに対応していません。</p>
-          <p>Chrome, Edge, またはSafariをお使いください。</p>
+        <div className="center-message">
+          <div className="center-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+              <line x1="1" y1="1" x2="23" y2="23" stroke="#e74c3c" strokeWidth="2" />
+            </svg>
+          </div>
+          <h2>音声認識に非対応</h2>
+          <p>Chrome、Edge、またはSafariでお試しください。</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Onboarding
+  if (showOnboarding) {
+    return (
+      <div className="app">
+        <div className="onboarding">
+          <div className="onboarding-logo">
+            <div className="onboarding-logo-circle">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="23" />
+                <line x1="8" y1="23" x2="16" y2="23" />
+              </svg>
+            </div>
+          </div>
+          <h1 className="onboarding-title">IQ Voice</h1>
+          <p className="onboarding-subtitle">話すだけで、テキストに。</p>
+          <div className="onboarding-features">
+            <div className="onboarding-feature">
+              <span className="feature-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="13 17 18 12 13 7" /><polyline points="6 17 11 12 6 7" /></svg>
+              </span>
+              <div>
+                <div className="feature-title">リアルタイム変換</div>
+                <div className="feature-desc">話した言葉が即座にテキストに</div>
+              </div>
+            </div>
+            <div className="onboarding-feature">
+              <span className="feature-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></svg>
+              </span>
+              <div>
+                <div className="feature-title">自動クリーンアップ</div>
+                <div className="feature-desc">「えーっと」などのフィラーを自動除去</div>
+              </div>
+            </div>
+            <div className="onboarding-feature">
+              <span className="feature-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+              </span>
+              <div>
+                <div className="feature-title">ワンタップコピー</div>
+                <div className="feature-desc">変換テキストをすぐに貼り付け可能</div>
+              </div>
+            </div>
+          </div>
+          <button className="onboarding-start" onClick={handleDismissOnboarding}>
+            はじめる
+          </button>
         </div>
       </div>
     )
@@ -152,97 +263,126 @@ function App() {
       {/* Header */}
       <header className="header">
         <div className="header-left">
+          {view !== 'main' ? (
+            <button className="back-btn" onClick={() => setView('main')}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+          ) : null}
           <h1 className="logo">
-            <span className="logo-icon">◉</span>
-            IQ Voice
+            {view === 'main' && <span className="logo-dot" />}
+            {view === 'main' ? 'IQ Voice' : view === 'settings' ? '設定' : '履歴'}
           </h1>
         </div>
-        <div className="header-right">
-          <button
-            className={`icon-btn ${showHistory ? 'active' : ''}`}
-            onClick={() => { setShowHistory(!showHistory); setShowSettings(false) }}
-            title="履歴"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-          </button>
-          <button
-            className={`icon-btn ${showSettings ? 'active' : ''}`}
-            onClick={() => { setShowSettings(!showSettings); setShowHistory(false) }}
-            title="設定"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
-        </div>
+        {view === 'main' && (
+          <div className="header-right">
+            <button className="icon-btn" onClick={() => setView('history')} title="履歴">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            </button>
+            <button className="icon-btn" onClick={() => setView('settings')} title="設定">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
+                <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
+                <line x1="1" y1="14" x2="7" y2="14" />
+                <line x1="9" y1="8" x2="15" y2="8" />
+                <line x1="17" y1="16" x2="23" y2="16" />
+              </svg>
+            </button>
+          </div>
+        )}
+        {view === 'history' && history.length > 0 && (
+          <div className="header-right">
+            <button className="text-btn danger" onClick={handleClearHistory}>全削除</button>
+          </div>
+        )}
       </header>
 
-      {/* Settings Panel */}
-      {showSettings && (
-        <div className="panel settings-panel">
-          <h3>設定</h3>
-          <div className="setting-row">
-            <label>言語</label>
-            <select value={language} onChange={e => setLanguage(e.target.value)}>
+      {/* Settings View */}
+      {view === 'settings' && (
+        <div className="settings-view">
+          <div className="setting-group">
+            <div className="setting-group-title">認識言語</div>
+            <div className="lang-grid">
               {LANGUAGES.map(l => (
-                <option key={l.code} value={l.code}>{l.label}</option>
+                <button
+                  key={l.code}
+                  className={`lang-chip ${language === l.code ? 'active' : ''}`}
+                  onClick={() => setLanguage(l.code)}
+                >
+                  <span className="lang-flag">{l.flag}</span>
+                  <span>{l.label}</span>
+                </button>
               ))}
-            </select>
+            </div>
           </div>
-          <div className="setting-row">
-            <label>フィラー除去</label>
-            <button
-              className={`toggle ${autoClean ? 'on' : ''}`}
-              onClick={() => setAutoClean(!autoClean)}
-            >
-              <span className="toggle-knob" />
-            </button>
+          <div className="setting-group">
+            <div className="setting-group-title">音声処理</div>
+            <div className="setting-card">
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">フィラー自動除去</div>
+                  <div className="setting-description">「えーっと」「um」などを自動で取り除きます</div>
+                </div>
+                <button className={`toggle ${autoClean ? 'on' : ''}`} onClick={() => setAutoClean(!autoClean)}>
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+              <div className="setting-divider" />
+              <div className="setting-row">
+                <div>
+                  <div className="setting-label">連続録音</div>
+                  <div className="setting-description">無音になっても録音を自動で再開します</div>
+                </div>
+                <button className={`toggle ${continuousMode ? 'on' : ''}`} onClick={() => setContinuousMode(!continuousMode)}>
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="setting-row">
-            <label>連続モード</label>
-            <button
-              className={`toggle ${continuousMode ? 'on' : ''}`}
-              onClick={() => setContinuousMode(!continuousMode)}
-            >
-              <span className="toggle-knob" />
-            </button>
+          <div className="setting-group">
+            <div className="setting-group-title">ショートカット</div>
+            <div className="setting-card">
+              <div className="shortcut-row">
+                <span>録音の開始/停止</span>
+                <kbd>Ctrl + Shift + V</kbd>
+              </div>
+              <div className="setting-divider" />
+              <div className="shortcut-row">
+                <span>テキストをコピー</span>
+                <kbd>Ctrl + Shift + C</kbd>
+              </div>
+            </div>
           </div>
-          <p className="setting-hint">
-            ショートカット: Ctrl+Shift+V（録音）/ Ctrl+Shift+C（コピー）
-          </p>
         </div>
       )}
 
-      {/* History Panel */}
-      {showHistory && (
-        <div className="panel history-panel">
-          <div className="panel-header">
-            <h3>履歴</h3>
-            {history.length > 0 && (
-              <button className="text-btn danger" onClick={handleClearHistory}>すべて削除</button>
-            )}
-          </div>
+      {/* History View */}
+      {view === 'history' && (
+        <div className="history-view">
           {history.length === 0 ? (
-            <p className="empty-state">まだ履歴がありません</p>
+            <div className="center-message">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.3">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+              <p>まだ履歴がありません</p>
+            </div>
           ) : (
             <div className="history-list">
               {history.map(entry => (
-                <button
-                  key={entry.id}
-                  className="history-item"
-                  onClick={() => handleLoadFromHistory(entry)}
-                >
+                <button key={entry.id} className="history-item" onClick={() => handleLoadFromHistory(entry)}>
                   <div className="history-text">
-                    {(entry.editedText || entry.text).slice(0, 80)}
-                    {(entry.editedText || entry.text).length > 80 ? '...' : ''}
+                    {(entry.editedText || entry.text).slice(0, 100)}
+                    {(entry.editedText || entry.text).length > 100 ? '...' : ''}
                   </div>
                   <div className="history-meta">
-                    {new Date(entry.timestamp).toLocaleString('ja-JP')}
-                    <span className="history-lang">{entry.lang}</span>
+                    <span>{new Date(entry.timestamp).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className="history-lang">{LANGUAGES.find(l => l.code === entry.lang)?.flag} {entry.lang.split('-')[0]}</span>
                   </div>
                 </button>
               ))}
@@ -251,115 +391,137 @@ function App() {
         </div>
       )}
 
-      {/* Main Content */}
-      <main className="main">
-        {/* Transcription Display */}
-        <div className="transcript-area" ref={displayRef}>
-          {!finalText && !interimText && state === 'idle' && (
-            <div className="placeholder">
-              <p>マイクボタンを押して話し始めてください</p>
-              <p className="placeholder-sub">音声がリアルタイムでテキストに変換されます</p>
+      {/* Main View */}
+      {view === 'main' && (
+        <>
+          <main className="main">
+            {/* Language badge */}
+            <div className="lang-badge" onClick={() => setView('settings')}>
+              {currentLang?.flag} {currentLang?.label}
+              {autoClean && <span className="clean-badge">フィラー除去</span>}
             </div>
-          )}
-          {editMode ? (
-            <textarea
-              ref={textAreaRef}
-              className="edit-textarea"
-              defaultValue={finalText}
-              autoFocus
-            />
-          ) : (
-            <>
-              {finalText && <span className="final-text">{finalText}</span>}
-              {interimText && <span className="interim-text">{interimText}</span>}
-            </>
-          )}
-        </div>
 
-        {/* Action Bar */}
-        {finalText && (
-          <div className="action-bar">
-            <button className="action-btn" onClick={handleEditToggle} title={editMode ? '保存' : '編集'}>
-              {editMode ? (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                </svg>
+            {/* Transcript Area */}
+            <div className="transcript-area" ref={displayRef}>
+              {!finalText && !interimText && state === 'idle' && (
+                <div className="placeholder">
+                  <div className="placeholder-mic">
+                    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.3">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                      <line x1="12" y1="19" x2="12" y2="23" />
+                      <line x1="8" y1="23" x2="16" y2="23" />
+                    </svg>
+                  </div>
+                  <p className="placeholder-main">下のマイクボタンをタップ</p>
+                  <p className="placeholder-sub">声を認識してテキストに変換します</p>
+                </div>
               )}
-              <span>{editMode ? '保存' : '編集'}</span>
-            </button>
-            <button className="action-btn" onClick={handleCopy} title="コピー">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-              <span>{copied ? 'コピー済み!' : 'コピー'}</span>
-            </button>
-            <button className="action-btn primary" onClick={handleCopyAndClear} title="コピーしてクリア">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M22 2L11 13" />
-                <path d="M22 2l-7 20-4-9-9-4 20-7z" />
-              </svg>
-              <span>送信</span>
-            </button>
-            <button className="action-btn danger-btn" onClick={clear} title="クリア">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              </svg>
-              <span>クリア</span>
-            </button>
+              {editMode ? (
+                <textarea
+                  ref={textAreaRef}
+                  className="edit-textarea"
+                  defaultValue={finalText}
+                  autoFocus
+                />
+              ) : (
+                <div className="transcript-text">
+                  {finalText && <span className="final-text">{finalText}</span>}
+                  {interimText && <span className="interim-text">{interimText}</span>}
+                  {state === 'recording' && <span className="cursor-blink">|</span>}
+                </div>
+              )}
+            </div>
+
+            {/* Action Bar */}
+            {finalText && !editMode && (
+              <div className="action-bar">
+                <button className="action-chip" onClick={handleEditToggle}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                  編集
+                </button>
+                <button className="action-chip" onClick={handleCopy}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  {copied ? 'OK!' : 'コピー'}
+                </button>
+                <button className="action-chip accent" onClick={handleCopyAndClear}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                  </svg>
+                  コピー&クリア
+                </button>
+                <button className="action-chip muted" onClick={clear}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+            {editMode && (
+              <div className="action-bar">
+                <button className="action-chip accent" onClick={handleEditToggle}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  保存
+                </button>
+                <button className="action-chip muted" onClick={() => setEditMode(false)}>
+                  キャンセル
+                </button>
+              </div>
+            )}
+          </main>
+
+          {/* Bottom Area */}
+          <div className="bottom-area">
+            {/* Waveform */}
+            <WaveformVisualizer volume={volumeLevel} active={state === 'recording'} />
+
+            {/* Recording info */}
+            {state === 'recording' && (
+              <div className="recording-info">
+                <span className="recording-dot" />
+                <span className="recording-time">{formatDuration(duration)}</span>
+              </div>
+            )}
+
+            {/* Record Button */}
+            <div className="record-container">
+              <button
+                className={`record-btn ${state === 'recording' ? 'recording' : ''}`}
+                onClick={handleToggleRecording}
+              >
+                {state === 'recording' ? (
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="6" width="12" height="12" rx="3" />
+                  </svg>
+                ) : (
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="23" />
+                    <line x1="8" y1="23" x2="16" y2="23" />
+                  </svg>
+                )}
+              </button>
+            </div>
+
+            <div className="record-hint">
+              {state === 'recording' ? 'タップで停止' : 'タップで録音開始'}
+            </div>
           </div>
-        )}
-      </main>
-
-      {/* Recording Button */}
-      <div className="record-container">
-        {state === 'recording' && (
-          <div className="pulse-ring" />
-        )}
-        <button
-          className={`record-btn ${state === 'recording' ? 'recording' : ''}`}
-          onClick={handleToggleRecording}
-          title={state === 'recording' ? '停止' : '録音開始'}
-        >
-          {state === 'recording' ? (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          ) : (
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="23" />
-              <line x1="8" y1="23" x2="16" y2="23" />
-            </svg>
-          )}
-        </button>
-        <div className="record-label">
-          {state === 'recording' ? '録音中...' : 'タップして録音'}
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="error-toast">
-          {error}
-        </div>
+        </>
       )}
 
-      {/* Status Bar */}
-      <div className="status-bar">
-        <span className="status-lang">{LANGUAGES.find(l => l.code === language)?.label}</span>
-        {autoClean && <span className="status-tag">フィラー除去ON</span>}
-        {finalText && (
-          <span className="status-count">{finalText.length}文字</span>
-        )}
-      </div>
+      {/* Toast notifications */}
+      {error && <div className="toast error-toast">{error}</div>}
+      {copied && <div className="toast success-toast">クリップボードにコピーしました</div>}
     </div>
   )
 }
